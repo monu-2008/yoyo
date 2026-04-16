@@ -1,0 +1,1108 @@
+"use client";
+
+import { useState, useEffect, useRef } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { ref, onValue, update, remove, push, set } from "firebase/database";
+import { db } from "@/lib/firebase";
+import { useAppStore } from "@/lib/store";
+import { useToast } from "@/hooks/use-toast";
+import {
+  LayoutDashboard, Wrench, ShoppingBag, Users, Package,
+  LogOut, Plus, Trash2, CheckCircle, Clock, AlertCircle,
+  ArrowLeft, TrendingUp, Phone, MapPin, User, Shield,
+  Upload, Eye, EyeOff, Image as ImageIcon, Settings,
+  ChevronRight, BarChart3, Activity, Navigation, ExternalLink,
+  Map, Maximize2, Minimize2
+} from "lucide-react";
+import dynamic from "next/dynamic";
+
+// Dynamically import the map component (no SSR - Leaflet needs browser)
+const StaffLiveMap = dynamic(() => import("@/components/admin/StaffLiveMap"), { ssr: false });
+
+interface ServiceRequest {
+  id: string;
+  name: string;
+  phone: string;
+  address: string;
+  serviceType: string;
+  problemDescription: string;
+  status: "pending" | "accepted" | "completed";
+  acceptedBy: string | null;
+  acceptedById?: string;
+  acceptedAt: number | null;
+  createdAt: number;
+  completedAt: number | null;
+}
+
+interface ProductOrder {
+  id: string;
+  productName: string;
+  productPrice: string;
+  customerName: string;
+  customerPhone: string;
+  customerAddress: string;
+  status: "pending" | "confirmed";
+  createdAt: number;
+}
+
+interface StaffMember {
+  id: string;
+  name: string;
+  email: string;
+  password: string;
+  phone: string;
+  active: boolean;
+  createdAt: number;
+}
+
+interface Product {
+  id: string;
+  name: string;
+  price: string;
+  category: string;
+  image: string;
+  description: string;
+  type?: string;
+  variant?: string;
+  order: number;
+}
+
+interface StaffLocation {
+  staffId: string;
+  staffName: string;
+  lat: number;
+  lng: number;
+  lastUpdated: number;
+  activeRequestId: string;
+  activeRequestName: string;
+  activeRequestService: string;
+}
+
+export default function AdminDashboard() {
+  const { adminLogout, setView, adminType, adminUser } = useAppStore();
+  const { toast } = useToast();
+  const [activeTab, setActiveTab] = useState("overview");
+  const [serviceRequests, setServiceRequests] = useState<ServiceRequest[]>([]);
+  const [productOrders, setProductOrders] = useState<ProductOrder[]>([]);
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [requestFilter, setRequestFilter] = useState("all");
+  const [staffLocations, setStaffLocations] = useState<StaffLocation[]>([]);
+  const [mapExpanded, setMapExpanded] = useState(false);
+
+  // Master admin is now determined by adminType from store
+  const masterVerified = adminType === "master";
+  const [adminSettings, setAdminSettings] = useState({ email: "admin@racecomputer.in", password: "admin123" });
+
+  // Staff form
+  const [staffFormOpen, setStaffFormOpen] = useState(false);
+  const [staffForm, setStaffForm] = useState({ name: "", email: "", password: "", phone: "" });
+  const [editingStaffId, setEditingStaffId] = useState<string | null>(null);
+
+  // Product form
+  const [productFormOpen, setProductFormOpen] = useState(false);
+  const [productForm, setProductForm] = useState({ name: "", price: "", category: "Accessories", image: "", description: "", type: "", variant: "" });
+  const [editingProductId, setEditingProductId] = useState<string | null>(null);
+  const [imageUploading, setImageUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Listen to Firebase data
+  useEffect(() => {
+    const unsub1 = onValue(ref(db, "serviceRequests"), (snap) => {
+      if (snap.exists()) {
+        const reqs: ServiceRequest[] = [];
+        snap.forEach((child) => reqs.push({ id: child.key || "", ...child.val() }));
+        reqs.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setServiceRequests(reqs);
+      } else setServiceRequests([]);
+    });
+
+    const unsub2 = onValue(ref(db, "productOrders"), (snap) => {
+      if (snap.exists()) {
+        const ords: ProductOrder[] = [];
+        snap.forEach((child) => ords.push({ id: child.key || "", ...child.val() }));
+        ords.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setProductOrders(ords);
+      } else setProductOrders([]);
+    });
+
+    const unsub3 = onValue(ref(db, "staff"), (snap) => {
+      if (snap.exists()) {
+        const s: StaffMember[] = [];
+        snap.forEach((child) => s.push({ id: child.key || "", ...child.val() }));
+        setStaff(s);
+      } else setStaff([]);
+    });
+
+    const unsub4 = onValue(ref(db, "products"), (snap) => {
+      if (snap.exists()) {
+        const p: Product[] = [];
+        snap.forEach((child) => p.push({ id: child.key || "", ...child.val() }));
+        setProducts(p);
+      } else setProducts([]);
+    });
+
+    const unsub5 = onValue(ref(db, "settings/admin"), (snap) => {
+      if (snap.exists()) {
+        setAdminSettings(snap.val());
+      }
+    });
+
+    // Listen to staff locations in real-time
+    const unsub6 = onValue(ref(db, "staffLocations"), (snap) => {
+      if (snap.exists()) {
+        const locs: StaffLocation[] = [];
+        snap.forEach((child) => {
+          const data = child.val();
+          if (data) {
+            locs.push({
+              staffId: child.key || "",
+              staffName: data.staffName || "Unknown",
+              lat: data.lat || 0,
+              lng: data.lng || 0,
+              lastUpdated: data.lastUpdated || 0,
+              activeRequestId: data.activeRequestId || "",
+              activeRequestName: data.activeRequestName || "",
+              activeRequestService: data.activeRequestService || "",
+            });
+          }
+        });
+        setStaffLocations(locs);
+      } else {
+        setStaffLocations([]);
+      }
+    });
+
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); };
+  }, []);
+
+  const pendingRequests = serviceRequests.filter((r) => r.status === "pending");
+  const acceptedRequests = serviceRequests.filter((r) => r.status === "accepted");
+  const completedRequests = serviceRequests.filter((r) => r.status === "completed");
+
+  const filteredRequests = requestFilter === "all"
+    ? serviceRequests
+    : serviceRequests.filter((r) => r.status === requestFilter);
+
+  const formatDate = (ts: number) => new Date(ts).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+
+  const getTimeSince = (ts: number) => {
+    const diff = Date.now() - ts;
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    if (hours > 0) return `${hours}h ${minutes % 60}m ago`;
+    if (minutes > 0) return `${minutes}m ${seconds % 60}s ago`;
+    return `${seconds}s ago`;
+  };
+
+  // Actions
+  const markCompleted = async (id: string) => {
+    await update(ref(db, `serviceRequests/${id}`), { status: "completed", completedAt: Date.now() });
+    toast({ title: "Marked as completed" });
+  };
+
+  const deleteRequest = async (id: string) => {
+    await remove(ref(db, `serviceRequests/${id}`));
+    toast({ title: "Request deleted" });
+  };
+
+  const confirmOrder = async (id: string) => {
+    await update(ref(db, `productOrders/${id}`), { status: "confirmed" });
+    toast({ title: "Order confirmed" });
+  };
+
+  const deleteOrder = async (id: string) => {
+    await remove(ref(db, `productOrders/${id}`));
+    toast({ title: "Order deleted" });
+  };
+
+  // Staff CRUD
+  const saveStaff = async () => {
+    if (!staffForm.name || !staffForm.email || !staffForm.password) {
+      toast({ title: "Fill all required fields", variant: "destructive" });
+      return;
+    }
+    if (editingStaffId) {
+      await update(ref(db, `staff/${editingStaffId}`), staffForm);
+      toast({ title: "Staff updated" });
+    } else {
+      await push(ref(db, "staff"), { ...staffForm, active: true, createdAt: Date.now() });
+      toast({ title: "Staff added" });
+    }
+    setStaffFormOpen(false);
+    setStaffForm({ name: "", email: "", password: "", phone: "" });
+    setEditingStaffId(null);
+  };
+
+  const editStaff = (s: StaffMember) => {
+    setStaffForm({ name: s.name, email: s.email, password: s.password, phone: s.phone || "" });
+    setEditingStaffId(s.id);
+    setStaffFormOpen(true);
+  };
+
+  const deleteStaff = async (id: string) => {
+    await remove(ref(db, `staff/${id}`));
+    toast({ title: "Staff removed" });
+  };
+
+  const toggleStaffActive = async (s: StaffMember) => {
+    await update(ref(db, `staff/${s.id}`), { active: !s.active });
+  };
+
+  // Product CRUD
+  const handleImageUpload = async (file: File) => {
+    setImageUploading(true);
+    try {
+      // Compress and convert to base64
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          const maxSize = 600;
+          let w = img.width;
+          let h = img.height;
+          if (w > maxSize || h > maxSize) {
+            if (w > h) { h = (h / w) * maxSize; w = maxSize; }
+            else { w = (w / h) * maxSize; h = maxSize; }
+          }
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          ctx?.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+          setProductForm((prev) => ({ ...prev, image: dataUrl }));
+          setImageUploading(false);
+        };
+        img.src = e.target?.result as string;
+      };
+      reader.readAsDataURL(file);
+    } catch {
+      toast({ title: "Image upload failed", variant: "destructive" });
+      setImageUploading(false);
+    }
+  };
+
+  const saveProduct = async () => {
+    if (!productForm.name || !productForm.price) {
+      toast({ title: "Fill all required fields", variant: "destructive" });
+      return;
+    }
+    if (editingProductId) {
+      await update(ref(db, `products/${editingProductId}`), productForm);
+      toast({ title: "Product updated" });
+    } else {
+      await push(ref(db, "products"), { ...productForm, order: products.length });
+      toast({ title: "Product added" });
+    }
+    setProductFormOpen(false);
+    setProductForm({ name: "", price: "", category: "Accessories", image: "", description: "", type: "", variant: "" });
+    setEditingProductId(null);
+  };
+
+  const editProduct = (p: Product) => {
+    setProductForm({ name: p.name, price: p.price, category: p.category, image: p.image || "", description: p.description || "", type: p.type || "", variant: p.variant || "" });
+    setEditingProductId(p.id);
+    setProductFormOpen(true);
+  };
+
+  const deleteProduct = async (id: string) => {
+    await remove(ref(db, `products/${id}`));
+    toast({ title: "Product deleted" });
+  };
+
+  // Master Admin access is now handled via login flow (PIN + Google)
+
+  const updateAdminCredentials = async () => {
+    await set(ref(db, "settings/admin"), adminSettings);
+    toast({ title: "Admin credentials updated!" });
+  };
+
+  // Get staff stats
+  const getStaffStats = (staffName: string) => {
+    const completed = serviceRequests.filter(r => r.acceptedBy === staffName && r.status === "completed").length;
+    const active = serviceRequests.filter(r => r.acceptedBy === staffName && r.status === "accepted").length;
+    return { completed, active };
+  };
+
+  const StatusBadge = ({ status }: { status: string }) => {
+    const styles: Record<string, string> = {
+      pending: "bg-yellow-100 text-yellow-700 border-yellow-300",
+      accepted: "bg-blue-100 text-blue-700 border-blue-300",
+      completed: "bg-green-100 text-green-700 border-green-300",
+      confirmed: "bg-green-100 text-green-700 border-green-300",
+    };
+    return <Badge className={`${styles[status] || "bg-gray-100 text-gray-700"} border text-[10px] font-semibold uppercase`}>{status}</Badge>;
+  };
+
+  return (
+    <div className="min-h-screen" style={{ background: masterVerified ? "linear-gradient(135deg, #0a0a1a 0%, #0d0d2b 30%, #1a0a2e 60%, #0a0a1a 100%)" : "linear-gradient(135deg, #f0f4ff 0%, #e8e0ff 50%, #f0f0ff 100%)" }}>
+      <style>{`
+        @keyframes livePulse {
+          0%, 100% { transform: scale(1); opacity: 1; }
+          50% { transform: scale(1.5); opacity: 0.5; }
+        }
+        @keyframes ripplePulse {
+          0% { transform: scale(0.8); opacity: 0.6; }
+          100% { transform: scale(2.2); opacity: 0; }
+        }
+      `}</style>
+      {/* Admin header — AQERIONX gradient for both admin and master */}
+      <header className="sticky top-0 z-40" style={{ background: masterVerified ? "rgba(10,10,30,0.9)" : "rgba(10,10,30,0.85)", backdropFilter: "blur(20px)", borderBottom: masterVerified ? "1px solid rgba(0,229,255,0.1)" : "1px solid rgba(0,229,255,0.08)", boxShadow: masterVerified ? "none" : "0 1px 3px rgba(0,0,0,0.05)" }}>
+        <div className="aqerionx-bar" />
+        <div className="max-w-7xl mx-auto px-4 flex items-center justify-between h-14">
+          <div className="flex items-center gap-3">
+            <a href="/">
+              <Button variant="ghost" size="sm" className="gap-1 text-gray-400 hover:text-cyan-400">
+                <ArrowLeft className="w-4 h-4" /> Back to Site
+              </Button>
+            </a>
+            <div className="h-6 w-px" style={{ background: "rgba(0,229,255,0.2)" }} />
+            <span className="font-bold text-sm aqerionx-text">
+              {masterVerified ? "Master Admin Panel" : "Admin Panel"}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {adminUser && (
+              <div className="flex items-center gap-2 mr-2">
+                {adminUser.photoURL ? (
+                  <img src={adminUser.photoURL} alt="" className="w-7 h-7 rounded-full" style={{ border: "2px solid rgba(0,229,255,0.3)" }} />
+                ) : (
+                  <div className="w-7 h-7 rounded-full flex items-center justify-center font-bold text-xs" style={{ background: "rgba(0,229,255,0.15)", color: "#00e5ff" }}>{adminUser.email?.charAt(0).toUpperCase()}</div>
+                )}
+                <span className="text-xs hidden sm:block text-gray-400">{adminUser.email}</span>
+                {masterVerified && <Badge className="text-[9px]" style={{ background: "linear-gradient(135deg, rgba(0,229,255,0.2), rgba(124,58,255,0.2))", color: "#00e5ff", border: "1px solid rgba(0,229,255,0.3)" }}>Master</Badge>}
+              </div>
+            )}
+            {!masterVerified && (
+              <a href="/racemaster">
+                <Button variant="outline" size="sm" className="gap-1 text-xs border-purple-200 text-purple-600 hover:bg-purple-50">
+                  <Shield className="w-3.5 h-3.5" /> Master Admin
+                </Button>
+              </a>
+            )}
+            <Button variant="ghost" size="sm" onClick={() => { adminLogout(); window.location.href = '/'; }} className="gap-1 text-red-400 hover:text-red-300 hover:bg-red-900/20">
+              <LogOut className="w-4 h-4" /> Logout
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      <div className="max-w-7xl mx-auto px-4 py-6">
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
+          <TabsList className="border shadow-sm mb-6 flex-wrap h-auto gap-1 p-1" style={{ background: "rgba(15,15,40,0.7)", borderColor: "rgba(0,229,255,0.15)" }}>
+            <TabsTrigger value="overview" className="gap-1.5 text-xs data-[state=active]:text-white" style={{ color: "#94a3b8" }}><LayoutDashboard className="w-3.5 h-3.5" /> Overview</TabsTrigger>
+            <TabsTrigger value="requests" className="gap-1.5 text-xs data-[state=active]:text-white" style={{ color: "#94a3b8" }}><Wrench className="w-3.5 h-3.5" /> Service Requests {pendingRequests.length > 0 && <Badge className="bg-red-500 text-white text-[9px] ml-1 px-1.5">{pendingRequests.length}</Badge>}</TabsTrigger>
+            <TabsTrigger value="orders" className="gap-1.5 text-xs data-[state=active]:text-white" style={{ color: "#94a3b8" }}><ShoppingBag className="w-3.5 h-3.5" /> Product Orders</TabsTrigger>
+            <TabsTrigger value="staff" className="gap-1.5 text-xs data-[state=active]:text-white" style={{ color: "#94a3b8" }}><Users className="w-3.5 h-3.5" /> Staff</TabsTrigger>
+            <TabsTrigger value="tracking" className="gap-1.5 text-xs data-[state=active]:text-white" style={{ color: "#94a3b8" }}><Navigation className="w-3.5 h-3.5" /> Live Tracking {staffLocations.length > 0 && <Badge className="bg-emerald-500 text-white text-[9px] ml-1 px-1.5 animate-pulse">{staffLocations.length}</Badge>}</TabsTrigger>
+            <TabsTrigger value="products" className="gap-1.5 text-xs data-[state=active]:text-white" style={{ color: "#94a3b8" }}><Package className="w-3.5 h-3.5" /> Products</TabsTrigger>
+            {masterVerified && (
+              <TabsTrigger value="master" className="gap-1.5 text-xs data-[state=active]:text-white" style={{ color: "#94a3b8" }}><Shield className="w-3.5 h-3.5" /> Master Admin</TabsTrigger>
+            )}
+          </TabsList>
+
+          {/* OVERVIEW */}
+          <TabsContent value="overview">
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              {[
+                { label: "Total Requests", value: serviceRequests.length, icon: Wrench, color: "blue" },
+                { label: "Pending", value: pendingRequests.length, icon: Clock, color: "yellow" },
+                { label: "Accepted", value: acceptedRequests.length, icon: AlertCircle, color: "purple" },
+                { label: "Completed", value: completedRequests.length, icon: CheckCircle, color: "green" },
+              ].map((stat) => (
+                <Card key={stat.label} className={masterVerified ? "aqerionx-card border-0 shadow-md" : "border border-gray-100 shadow-sm hover:shadow-md transition-shadow bg-white"}>
+                  <CardContent className="p-5 flex items-center gap-4">
+                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${masterVerified ? "" : stat.color === "blue" ? "bg-blue-50" : stat.color === "yellow" ? "bg-yellow-50" : stat.color === "purple" ? "bg-purple-50" : "bg-green-50"}`} style={masterVerified ? { background: stat.color === "blue" ? "rgba(0,229,255,0.15)" : stat.color === "yellow" ? "rgba(250,204,21,0.15)" : stat.color === "purple" ? "rgba(124,58,255,0.15)" : "rgba(16,185,129,0.15)" } : {}}>
+                      <stat.icon className={`w-6 h-6 ${masterVerified ? "" : stat.color === "blue" ? "text-blue-600" : stat.color === "yellow" ? "text-yellow-600" : stat.color === "purple" ? "text-purple-600" : "text-green-600"}`} style={masterVerified ? { color: stat.color === "blue" ? "#00e5ff" : stat.color === "yellow" ? "#facc15" : stat.color === "purple" ? "#7c3aff" : "#10b981" } : {}} />
+                    </div>
+                    <div>
+                      <div className={`text-2xl font-extrabold ${masterVerified ? "text-white" : "text-gray-900"}`}>{stat.value}</div>
+                      <div className={`text-xs font-medium ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>{stat.label}</div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              {[
+                { label: "Product Orders", value: productOrders.length, icon: ShoppingBag, color: "red" },
+                { label: "Staff Members", value: staff.length, icon: Users, color: "blue" },
+                { label: "Products", value: products.length, icon: Package, color: "purple" },
+                { label: "Revenue", value: `₹${completedRequests.length * 500 + productOrders.filter(o => o.status === "confirmed").length * 2000}`, icon: TrendingUp, color: "green" },
+              ].map((stat) => (
+                <Card key={stat.label} className={masterVerified ? "aqerionx-card border-0 shadow-md" : "border border-gray-100 shadow-sm hover:shadow-md transition-shadow bg-white"}>
+                  <CardContent className="p-5 flex items-center gap-4">
+                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${masterVerified ? "" : stat.color === "red" ? "bg-red-50" : stat.color === "blue" ? "bg-blue-50" : stat.color === "purple" ? "bg-purple-50" : "bg-green-50"}`} style={masterVerified ? { background: stat.color === "red" ? "rgba(239,68,68,0.15)" : stat.color === "blue" ? "rgba(0,229,255,0.15)" : stat.color === "purple" ? "rgba(124,58,255,0.15)" : "rgba(16,185,129,0.15)" } : {}}>
+                      <stat.icon className={`w-6 h-6 ${masterVerified ? "" : stat.color === "red" ? "text-red-500" : stat.color === "blue" ? "text-blue-600" : stat.color === "purple" ? "text-purple-600" : "text-green-600"}`} style={masterVerified ? { color: stat.color === "red" ? "#ef4444" : stat.color === "blue" ? "#00e5ff" : stat.color === "purple" ? "#7c3aff" : "#10b981" } : {}} />
+                    </div>
+                    <div>
+                      <div className={`text-2xl font-extrabold ${masterVerified ? "text-white" : "text-gray-900"}`}>{stat.value}</div>
+                      <div className={`text-xs font-medium ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>{stat.label}</div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+
+            <div className="grid lg:grid-cols-2 gap-6">
+              <Card className={masterVerified ? "aqerionx-card border-0" : "border border-gray-100 shadow-sm bg-white"}>
+                <CardHeader className="pb-3">
+                  <CardTitle className={`text-sm font-semibold flex items-center gap-2 ${masterVerified ? "text-yellow-400" : ""}`}>
+                    <Clock className={`w-4 h-4 ${masterVerified ? "text-yellow-400" : "text-yellow-500"}`} /> Recent Pending Requests
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {pendingRequests.length === 0 ? (
+                    <p className={`text-sm text-center py-6 ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>No pending requests</p>
+                  ) : (
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {pendingRequests.slice(0, 5).map((r) => (
+                        <div key={r.id} className={`flex items-center justify-between p-3 rounded-lg border ${masterVerified ? "" : "bg-yellow-50/60 border-yellow-100"}`} style={masterVerified ? { background: "rgba(250,204,21,0.1)", border: "1px solid rgba(250,204,21,0.15)" } : {}}>
+                          <div>
+                            <div className={`text-sm font-semibold ${masterVerified ? "text-gray-200" : "text-gray-900"}`}>{r.name}</div>
+                            <div className={`text-xs ${masterVerified ? "text-gray-500" : "text-gray-500"}`}>{r.serviceType} · {formatDate(r.createdAt)}</div>
+                          </div>
+                          <StatusBadge status="pending" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card className={masterVerified ? "aqerionx-card border-0" : "border border-gray-100 shadow-sm bg-white"}>
+                <CardHeader className="pb-3">
+                  <CardTitle className={`text-sm font-semibold flex items-center gap-2 ${masterVerified ? "text-cyan-400" : ""}`}>
+                    <ShoppingBag className={`w-4 h-4 ${masterVerified ? "text-cyan-400" : "text-blue-500"}`} /> Recent Orders
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {productOrders.length === 0 ? (
+                    <p className={`text-sm text-center py-6 ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>No orders yet</p>
+                  ) : (
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {productOrders.slice(0, 5).map((o) => (
+                        <div key={o.id} className={`flex items-center justify-between p-3 rounded-lg border ${masterVerified ? "" : "bg-blue-50/60 border-blue-100"}`} style={masterVerified ? { background: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.15)" } : {}}>
+                          <div>
+                            <div className={`text-sm font-semibold ${masterVerified ? "text-gray-200" : "text-gray-900"}`}>{o.productName}</div>
+                            <div className={`text-xs ${masterVerified ? "text-gray-500" : "text-gray-500"}`}>{o.customerName} · {formatDate(o.createdAt)}</div>
+                          </div>
+                          <StatusBadge status={o.status} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Staff Performance */}
+            {staff.length > 0 && (
+              <Card className={`${masterVerified ? "aqerionx-card border-0" : "border border-gray-100 shadow-sm bg-white"} mt-6`}>
+                <CardHeader className="pb-3">
+                  <CardTitle className={`text-sm font-semibold flex items-center gap-2 ${masterVerified ? "text-purple-400" : ""}`}>
+                    <BarChart3 className={`w-4 h-4 ${masterVerified ? "text-purple-400" : "text-purple-500"}`} /> Staff Performance
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    {staff.filter(s => s.active !== false).map((s) => {
+                      const stats = getStaffStats(s.name);
+                      return (
+                        <div key={s.id} className={`flex items-center justify-between p-3 rounded-lg border ${masterVerified ? "" : "bg-gray-50/60 border-gray-100"}`} style={masterVerified ? { background: "rgba(124,58,255,0.08)", border: "1px solid rgba(124,58,255,0.15)" } : {}}>
+                          <div className="flex items-center gap-3">
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs ${masterVerified ? "" : "bg-blue-100 text-blue-600"}`} style={masterVerified ? { background: "rgba(0,229,255,0.15)", color: "#00e5ff" } : {}}>{s.name.charAt(0).toUpperCase()}</div>
+                            <div>
+                              <div className={`text-sm font-semibold ${masterVerified ? "text-gray-200" : "text-gray-900"}`}>{s.name}</div>
+                              <div className={`text-xs ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>{s.email}</div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <Badge className={`${masterVerified ? "text-[10px]" : "bg-blue-50 text-blue-600 border-blue-200 text-[10px]"}`} style={masterVerified ? { background: "rgba(0,229,255,0.15)", color: "#00e5ff", border: "1px solid rgba(0,229,255,0.2)" } : {}}>{stats.active} Active</Badge>
+                            <Badge className={`${masterVerified ? "text-[10px]" : "bg-green-50 text-green-600 border-green-200 text-[10px]"}`} style={masterVerified ? { background: "rgba(16,185,129,0.15)", color: "#10b981", border: "1px solid rgba(16,185,129,0.2)" } : {}}>{stats.completed} Done</Badge>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </TabsContent>
+
+          {/* SERVICE REQUESTS */}
+          <TabsContent value="requests">
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
+              {["all", "pending", "accepted", "completed"].map((f) => (
+                <Button key={f} variant={requestFilter === f ? "default" : "outline"} size="sm" onClick={() => setRequestFilter(f)} className={requestFilter === f ? "bg-blue-600" : ""}>
+                  {f.charAt(0).toUpperCase() + f.slice(1)}
+                </Button>
+              ))}
+              <span className="text-xs text-gray-400 ml-2">{filteredRequests.length} results</span>
+            </div>
+
+            <Card className={masterVerified ? "aqerionx-card border-0" : "border border-gray-100 shadow-sm bg-white"}>
+              <CardContent className="p-0">
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className={masterVerified ? "" : "bg-gray-50/50"} style={masterVerified ? { background: "rgba(15,15,40,0.5)" } : {}}>
+                        <TableHead className="text-xs">Name</TableHead>
+                        <TableHead className="text-xs">Phone</TableHead>
+                        <TableHead className="text-xs">Address</TableHead>
+                        <TableHead className="text-xs">Service</TableHead>
+                        <TableHead className="text-xs">Status</TableHead>
+                        <TableHead className="text-xs">Accepted By</TableHead>
+                        <TableHead className="text-xs">Date</TableHead>
+                        <TableHead className="text-xs">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredRequests.length === 0 ? (
+                        <TableRow><TableCell colSpan={8} className="text-center text-gray-400 py-8">No requests found</TableCell></TableRow>
+                      ) : (
+                        filteredRequests.map((r) => (
+                          <TableRow key={r.id} className="hover:bg-blue-50/30">
+                            <TableCell className="text-sm font-medium">{r.name}</TableCell>
+                            <TableCell className="text-sm">{r.phone}</TableCell>
+                            <TableCell className="text-sm max-w-[200px] truncate">{r.address}</TableCell>
+                            <TableCell className="text-sm">{r.serviceType}</TableCell>
+                            <TableCell><StatusBadge status={r.status} /></TableCell>
+                            <TableCell className="text-sm">{r.acceptedBy || "—"}</TableCell>
+                            <TableCell className="text-xs text-gray-400">{formatDate(r.createdAt)}</TableCell>
+                            <TableCell>
+                              <div className="flex gap-1">
+                                {r.status !== "completed" && (
+                                  <Button size="sm" variant="outline" className="text-green-600 border-green-200 hover:bg-green-50 text-[10px] h-7" onClick={() => markCompleted(r.id)}>
+                                    <CheckCircle className="w-3 h-3" />
+                                  </Button>
+                                )}
+                                <Button size="sm" variant="outline" className="text-red-500 border-red-200 hover:bg-red-50 text-[10px] h-7" onClick={() => deleteRequest(r.id)}>
+                                  <Trash2 className="w-3 h-3" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* PRODUCT ORDERS */}
+          <TabsContent value="orders">
+            <Card className={masterVerified ? "aqerionx-card border-0" : "border border-gray-100 shadow-sm bg-white"}>
+              <CardContent className="p-0">
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className={masterVerified ? "" : "bg-gray-50/50"} style={masterVerified ? { background: "rgba(15,15,40,0.5)" } : {}}>
+                        <TableHead className="text-xs">Product</TableHead>
+                        <TableHead className="text-xs">Price</TableHead>
+                        <TableHead className="text-xs">Customer</TableHead>
+                        <TableHead className="text-xs">Phone</TableHead>
+                        <TableHead className="text-xs">Address</TableHead>
+                        <TableHead className="text-xs">Status</TableHead>
+                        <TableHead className="text-xs">Date</TableHead>
+                        <TableHead className="text-xs">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {productOrders.length === 0 ? (
+                        <TableRow><TableCell colSpan={8} className="text-center text-gray-400 py-8">No orders yet</TableCell></TableRow>
+                      ) : (
+                        productOrders.map((o) => (
+                          <TableRow key={o.id} className="hover:bg-blue-50/30">
+                            <TableCell className="text-sm font-medium">{o.productName}</TableCell>
+                            <TableCell className="text-sm font-bold text-blue-600">{o.productPrice}</TableCell>
+                            <TableCell className="text-sm">{o.customerName}</TableCell>
+                            <TableCell className="text-sm">{o.customerPhone}</TableCell>
+                            <TableCell className="text-sm max-w-[200px] truncate">{o.customerAddress}</TableCell>
+                            <TableCell><StatusBadge status={o.status} /></TableCell>
+                            <TableCell className="text-xs text-gray-400">{formatDate(o.createdAt)}</TableCell>
+                            <TableCell>
+                              <div className="flex gap-1">
+                                {o.status !== "confirmed" && (
+                                  <Button size="sm" variant="outline" className="text-green-600 border-green-200 hover:bg-green-50 text-[10px] h-7" onClick={() => confirmOrder(o.id)}>
+                                    <CheckCircle className="w-3 h-3" />
+                                  </Button>
+                                )}
+                                <Button size="sm" variant="outline" className="text-red-500 border-red-200 hover:bg-red-50 text-[10px] h-7" onClick={() => deleteOrder(o.id)}>
+                                  <Trash2 className="w-3 h-3" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* STAFF MANAGEMENT */}
+          <TabsContent value="staff">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className={`font-bold ${masterVerified ? "text-gray-200" : "text-gray-900"}`}>Staff Members ({staff.length})</h3>
+              <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-white gap-1" onClick={() => { setStaffForm({ name: "", email: "", password: "", phone: "" }); setEditingStaffId(null); setStaffFormOpen(true); }}>
+                <Plus className="w-4 h-4" /> Add Staff
+              </Button>
+            </div>
+
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {staff.map((s) => {
+                const stats = getStaffStats(s.name);
+                return (
+                  <Card key={s.id} className={masterVerified ? "aqerionx-card border-0 hover:shadow-lg transition-shadow" : "border border-gray-100 shadow-sm bg-white hover:shadow-md transition-shadow"}>
+                    <CardContent className="p-5">
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm ${s.active !== false ? (masterVerified ? "" : "bg-blue-600") : "bg-gray-400"}`} style={masterVerified && s.active !== false ? { background: "linear-gradient(135deg, #00e5ff, #7c3aff)" } : {}}>
+                            {s.name.charAt(0).toUpperCase()}
+                          </div>
+                          <div>
+                            <div className={`font-semibold text-sm ${masterVerified ? "text-gray-200" : "text-gray-900"}`}>{s.name}</div>
+                            <div className={`text-xs ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>{s.email}</div>
+                          </div>
+                        </div>
+                        <Badge className={s.active !== false ? (masterVerified ? "" : "bg-green-50 text-green-700 border-green-200") : (masterVerified ? "" : "bg-red-50 text-red-600 border-red-200")} variant="outline" style={masterVerified ? s.active !== false ? { background: "rgba(16,185,129,0.15)", color: "#10b981", border: "1px solid rgba(16,185,129,0.3)" } : { background: "rgba(239,68,68,0.15)", color: "#ef4444", border: "1px solid rgba(239,68,68,0.3)" } : {}}>
+                          {s.active !== false ? "Active" : "Disabled"}
+                        </Badge>
+                      </div>
+                      {s.phone && <div className={`text-xs mb-2 flex items-center gap-1 ${masterVerified ? "text-gray-400" : "text-gray-500"}`}><Phone className="w-3 h-3" />{s.phone}</div>}
+                      {/* Staff Stats */}
+                      <div className="flex gap-2 mb-3">
+                        <Badge className={`${masterVerified ? "text-[9px]" : "bg-blue-50 text-blue-600 border-blue-200 text-[9px]"}`} style={masterVerified ? { background: "rgba(0,229,255,0.15)", color: "#00e5ff", border: "1px solid rgba(0,229,255,0.2)" } : {}}>{stats.active} Active</Badge>
+                        <Badge className={`${masterVerified ? "text-[9px]" : "bg-green-50 text-green-600 border-green-200 text-[9px]"}`} style={masterVerified ? { background: "rgba(16,185,129,0.15)", color: "#10b981", border: "1px solid rgba(16,185,129,0.2)" } : {}}>{stats.completed} Completed</Badge>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="outline" className="text-[10px] h-7 flex-1" onClick={() => editStaff(s)}>Edit</Button>
+                        <Button size="sm" variant="outline" className="text-[10px] h-7 flex-1" onClick={() => toggleStaffActive(s)}>{s.active !== false ? "Disable" : "Enable"}</Button>
+                        <Button size="sm" variant="outline" className="text-red-500 border-red-200 hover:bg-red-50 text-[10px] h-7" onClick={() => deleteStaff(s.id)}>
+                          <Trash2 className="w-3 h-3" />
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+              {staff.length === 0 && (
+                <div className={`col-span-full text-center py-12 ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>No staff members yet. Add one!</div>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* LIVE TRACKING */}
+          <TabsContent value="tracking">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-3">
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${masterVerified ? "" : "bg-emerald-50"}`} style={masterVerified ? { background: "rgba(16,185,129,0.15)" } : {}}>
+                  <Map className={`w-5 h-5 ${masterVerified ? "text-emerald-400" : "text-emerald-600"}`} />
+                </div>
+                <div>
+                  <h3 className={`font-bold ${masterVerified ? "text-gray-200" : "text-gray-900"}`}>Live Staff Tracking</h3>
+                  <p className={`text-xs ${masterVerified ? "text-gray-500" : "text-gray-500"}`}>Real-time GPS map — staff locations update automatically when they accept requests</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Badge className={`${masterVerified ? "" : "bg-emerald-50 text-emerald-700 border-emerald-200"} border text-[10px]`} style={masterVerified ? { background: "rgba(16,185,129,0.15)", color: "#10b981", border: "1px solid rgba(16,185,129,0.3)" } : {}}>
+                  <span className="relative flex h-2 w-2 mr-1.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </span>
+                  {staffLocations.length} Active
+                </Badge>
+                {staffLocations.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`gap-1 text-xs ${masterVerified ? "border-cyan-800/50 text-cyan-400 hover:bg-cyan-900/20" : "border-gray-200 text-gray-600 hover:bg-gray-50"}`}
+                    onClick={() => setMapExpanded(!mapExpanded)}
+                  >
+                    {mapExpanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                    {mapExpanded ? "Collapse" : "Expand"}
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {/* Inbuilt Map */}
+            <Card className={`${masterVerified ? "aqerionx-card border-0" : "border border-gray-100 shadow-sm bg-white"} overflow-hidden mb-6`}>
+              <CardContent className="p-0">
+                {staffLocations.length === 0 ? (
+                  <div className="py-16 text-center">
+                    <div className={`w-16 h-16 rounded-full mx-auto mb-4 flex items-center justify-center ${masterVerified ? "" : "bg-gray-100"}`} style={masterVerified ? { background: "rgba(0,229,255,0.1)" } : {}}>
+                      <Map className={`w-8 h-8 ${masterVerified ? "text-gray-600" : "text-gray-400"}`} />
+                    </div>
+                    <h3 className={`font-semibold mb-1 ${masterVerified ? "text-gray-300" : "text-gray-700"}`}>No staff being tracked right now</h3>
+                    <p className={`text-sm ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>When staff accept a service request, their live location will appear on the map.</p>
+                  </div>
+                ) : (
+                  <div style={{ height: mapExpanded ? "700px" : "450px", transition: "height 0.3s ease" }}>
+                    <StaffLiveMap staffLocations={staffLocations} isDark={masterVerified} />
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Staff Location Cards — below the map */}
+            {staffLocations.length > 0 && (
+              <div className="space-y-3 mb-6">
+                <h4 className={`text-sm font-semibold ${masterVerified ? "text-gray-400" : "text-gray-500"}`}>
+                  Active Staff Details
+                </h4>
+                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {staffLocations.map((loc) => (
+                    <Card key={loc.staffId} className={masterVerified ? "aqerionx-card border-0 hover:shadow-lg transition-shadow" : "border border-gray-100 shadow-sm bg-white hover:shadow-md transition-shadow"}>
+                      <CardContent className="p-4">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-3">
+                            <div className="relative">
+                              <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm ${masterVerified ? "" : "bg-emerald-600"}`} style={masterVerified ? { background: "linear-gradient(135deg, #00e5ff, #7c3aff)" } : {}}>
+                                {loc.staffName.charAt(0).toUpperCase()}
+                              </div>
+                              <div className="absolute -bottom-0.5 -right-0.5">
+                                <span className="relative flex h-3.5 w-3.5">
+                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                  <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500 border-2" style={masterVerified ? { borderColor: "rgba(15,15,40,1)" } : { borderColor: "white" }}></span>
+                                </span>
+                              </div>
+                            </div>
+                            <div>
+                              <div className={`font-bold text-sm ${masterVerified ? "text-gray-200" : "text-gray-900"}`}>{loc.staffName}</div>
+                              <div className="flex items-center gap-1.5">
+                                <Badge className={`${masterVerified ? "" : "bg-emerald-50 text-emerald-700 border-emerald-200"} border text-[8px] px-1.5 py-0`} style={masterVerified ? { background: "rgba(16,185,129,0.15)", color: "#10b981", border: "1px solid rgba(16,185,129,0.3)" } : {}}>
+                                  LIVE
+                                </Badge>
+                              </div>
+                            </div>
+                          </div>
+                          <a href={`https://www.google.com/maps?q=${loc.lat},${loc.lng}`} target="_blank" rel="noopener noreferrer">
+                            <Button size="sm" variant="outline" className={`gap-1 text-[10px] h-7 shrink-0 ${masterVerified ? "border-cyan-800/50 text-cyan-400 hover:bg-cyan-900/20" : "border-blue-200 text-blue-600 hover:bg-blue-50"}`}>
+                              <ExternalLink className="w-3 h-3" /> Maps
+                            </Button>
+                          </a>
+                        </div>
+                        {loc.activeRequestName && (
+                          <div className={`mt-2 p-2 rounded-lg text-xs ${masterVerified ? "" : "bg-blue-50"}`} style={masterVerified ? { background: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.1)" } : {}}>
+                            <div className="flex items-center gap-1.5">
+                              <Wrench className={`w-3 h-3 ${masterVerified ? "text-cyan-400" : "text-blue-500"}`} />
+                              <span className={masterVerified ? "text-gray-300" : "text-gray-700"}>{loc.activeRequestName}</span>
+                              <span style={{ color: masterVerified ? "#00e5ff" : "#3b82f6" }}>{loc.activeRequestService}</span>
+                            </div>
+                          </div>
+                        )}
+                        <div className={`flex items-center gap-3 mt-2 text-[10px] ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>
+                          <div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}</div>
+                          <div className="flex items-center gap-1"><Clock className="w-3 h-3" />{getTimeSince(loc.lastUpdated)}</div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Staff who are not being tracked */}
+            {staff.length > 0 && (
+              <div>
+                <h4 className={`text-sm font-semibold mb-3 ${masterVerified ? "text-gray-400" : "text-gray-500"}`}>
+                  Offline Staff
+                </h4>
+                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {staff
+                    .filter(s => s.active !== false && !staffLocations.some(loc => loc.staffId === s.id))
+                    .map((s) => (
+                      <Card key={s.id} className={masterVerified ? "border-0 opacity-60" : "border border-gray-100 shadow-sm bg-white opacity-60"}>
+                        <CardContent className="p-4 flex items-center gap-3">
+                          <div className={`w-9 h-9 rounded-full flex items-center justify-center text-white font-bold text-xs ${masterVerified ? "" : "bg-gray-400"}`} style={masterVerified ? { background: "rgba(100,100,120,0.3)" } : {}}>
+                            {s.name.charAt(0).toUpperCase()}
+                          </div>
+                          <div className="flex-1">
+                            <div className={`text-sm font-medium ${masterVerified ? "text-gray-400" : "text-gray-600"}`}>{s.name}</div>
+                            <div className="flex items-center gap-1.5">
+                              <span className={`w-2 h-2 rounded-full ${masterVerified ? "bg-gray-600" : "bg-gray-300"}`}></span>
+                              <span className={`text-[10px] ${masterVerified ? "text-gray-600" : "text-gray-400"}`}>No active job</span>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))
+                  }
+                  {staff.filter(s => s.active !== false && !staffLocations.some(loc => loc.staffId === s.id)).length === 0 && (
+                    <p className={`text-xs ${masterVerified ? "text-gray-600" : "text-gray-400"}`}>All active staff are currently being tracked</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </TabsContent>
+
+          {/* PRODUCT MANAGEMENT */}
+          <TabsContent value="products">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className={`font-bold ${masterVerified ? "text-gray-200" : "text-gray-900"}`}>Products ({products.length})</h3>
+              <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-white gap-1" onClick={() => { setProductForm({ name: "", price: "", category: "Accessories", image: "", description: "", type: "", variant: "" }); setEditingProductId(null); setProductFormOpen(true); }}>
+                <Plus className="w-4 h-4" /> Add Product
+              </Button>
+            </div>
+
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {products.map((p) => (
+                <Card key={p.id} className={masterVerified ? "aqerionx-card border-0 hover:shadow-lg transition-shadow group" : "border border-gray-100 shadow-sm bg-white hover:shadow-md transition-shadow group"}>
+                  <div className={`h-32 flex items-center justify-center relative overflow-hidden ${masterVerified ? "" : "bg-gradient-to-br from-blue-50 to-purple-50"}`} style={masterVerified ? { background: "rgba(15,15,40,0.5)" } : {}}>
+                    {p.image ? (
+                      <img src={p.image} alt={p.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <Package className={`w-8 h-8 ${masterVerified ? "text-gray-600" : "text-blue-300"}`} />
+                    )}
+                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="secondary" className="h-7 text-[10px]" onClick={() => editProduct(p)}>Edit</Button>
+                        <Button size="sm" variant="destructive" className="h-7 text-[10px]" onClick={() => deleteProduct(p.id)}>Delete</Button>
+                      </div>
+                    </div>
+                  </div>
+                  <CardContent className="p-3">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <h4 className={`font-bold text-xs ${masterVerified ? "text-gray-200" : "text-gray-900"}`}>{p.name}</h4>
+                        <p className={`text-[10px] ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>{p.category} {p.type ? `· ${p.type}` : ''}</p>
+                      </div>
+                      <span className={`text-sm font-extrabold ${masterVerified ? "text-cyan-400" : "text-blue-600"}`}>{p.price}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+              {products.length === 0 && (
+                <div className={`col-span-full text-center py-12 ${masterVerified ? "text-gray-500" : "text-gray-400"}`}>No products yet. Add one!</div>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* MASTER ADMIN TAB */}
+          {masterVerified && (
+            <TabsContent value="master">
+              <Card className="border-2 border-purple-200 shadow-md bg-white">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-purple-700">
+                    <Shield className="w-5 h-5" /> Master Admin Control Panel
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-6">
+                  {/* Update Admin Credentials */}
+                  <div className="space-y-4">
+                    <h4 className="font-bold text-gray-900 flex items-center gap-2"><Settings className="w-4 h-4" /> Admin Credentials</h4>
+                    <div className="grid sm:grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <Label>Admin Email</Label>
+                        <Input value={adminSettings.email} onChange={(e) => setAdminSettings({ ...adminSettings, email: e.target.value })} className="bg-white" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Admin Password</Label>
+                        <Input value={adminSettings.password} onChange={(e) => setAdminSettings({ ...adminSettings, password: e.target.value })} className="bg-white" />
+                      </div>
+                    </div>
+                    <Button onClick={updateAdminCredentials} className="bg-purple-600 hover:bg-purple-700 text-white gap-1">
+                      <Settings className="w-4 h-4" /> Update Credentials
+                    </Button>
+                  </div>
+
+                  {/* System Stats */}
+                  <div className="space-y-4">
+                    <h4 className="font-bold text-gray-900 flex items-center gap-2"><Activity className="w-4 h-4" /> System Statistics</h4>
+                    <div className="grid sm:grid-cols-3 gap-4">
+                      <div className="bg-blue-50/60 rounded-xl p-4 border border-blue-100">
+                        <div className="text-2xl font-extrabold text-blue-600">{serviceRequests.length}</div>
+                        <div className="text-xs text-gray-500">Total Service Requests</div>
+                      </div>
+                      <div className="bg-green-50/60 rounded-xl p-4 border border-green-100">
+                        <div className="text-2xl font-extrabold text-green-600">{productOrders.length}</div>
+                        <div className="text-xs text-gray-500">Total Product Orders</div>
+                      </div>
+                      <div className="bg-purple-50/60 rounded-xl p-4 border border-purple-100">
+                        <div className="text-2xl font-extrabold text-purple-600">{staff.length}</div>
+                        <div className="text-xs text-gray-500">Staff Members</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* All Activity Log - who ordered what and when */}
+                  <div className="space-y-4">
+                    <h4 className="font-bold text-gray-900 flex items-center gap-2"><BarChart3 className="w-4 h-4" /> Activity Log</h4>
+                    <div className="space-y-2 max-h-96 overflow-y-auto">
+                      {/* Service requests */}
+                      {serviceRequests.map((r) => (
+                        <div key={r.id} className="flex items-center justify-between p-3 bg-gray-50/60 rounded-lg border border-gray-100">
+                          <div className="flex items-center gap-3">
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center ${r.status === "completed" ? "bg-green-100" : r.status === "accepted" ? "bg-blue-100" : "bg-yellow-100"}`}>
+                              <Wrench className={`w-4 h-4 ${r.status === "completed" ? "text-green-600" : r.status === "accepted" ? "text-blue-600" : "text-yellow-600"}`} />
+                            </div>
+                            <div>
+                              <div className="text-xs font-semibold text-gray-900">{r.name} · {r.serviceType}</div>
+                              <div className="text-[10px] text-gray-400">{r.acceptedBy ? `Accepted by ${r.acceptedBy}` : "Pending"} · {formatDate(r.createdAt)}</div>
+                            </div>
+                          </div>
+                          <StatusBadge status={r.status} />
+                        </div>
+                      ))}
+                      {/* Product orders */}
+                      {productOrders.map((o) => (
+                        <div key={o.id} className="flex items-center justify-between p-3 bg-gray-50/60 rounded-lg border border-gray-100">
+                          <div className="flex items-center gap-3">
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center ${o.status === "confirmed" ? "bg-green-100" : "bg-blue-100"}`}>
+                              <ShoppingBag className={`w-4 h-4 ${o.status === "confirmed" ? "text-green-600" : "text-blue-600"}`} />
+                            </div>
+                            <div>
+                              <div className="text-xs font-semibold text-gray-900">{o.customerName} ordered {o.productName}</div>
+                              <div className="text-[10px] text-gray-400">{o.customerPhone} · {formatDate(o.createdAt)}</div>
+                            </div>
+                          </div>
+                          <StatusBadge status={o.status} />
+                        </div>
+                      ))}
+                      {serviceRequests.length === 0 && productOrders.length === 0 && (
+                        <p className="text-sm text-gray-400 text-center py-6">No activity yet</p>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </TabsContent>
+          )}
+        </Tabs>
+      </div>
+
+      {/* Staff Form Dialog */}
+      <Dialog open={staffFormOpen} onOpenChange={setStaffFormOpen}>
+        <DialogContent className="sm:max-w-md bg-white">
+          <DialogHeader>
+            <DialogTitle>{editingStaffId ? "Edit Staff" : "Add Staff Member"}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5"><Label>Full Name *</Label><Input placeholder="Staff name" value={staffForm.name} onChange={(e) => setStaffForm({ ...staffForm, name: e.target.value })} className="bg-white" /></div>
+            <div className="space-y-1.5"><Label>Email *</Label><Input type="email" placeholder="staff@racecomputer.in" value={staffForm.email} onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })} className="bg-white" /></div>
+            <div className="space-y-1.5"><Label>Password *</Label><Input type="password" placeholder="••••••" value={staffForm.password} onChange={(e) => setStaffForm({ ...staffForm, password: e.target.value })} className="bg-white" /></div>
+            <div className="space-y-1.5"><Label>Phone</Label><Input type="tel" placeholder="+91 XXXXX XXXXX" value={staffForm.phone} onChange={(e) => setStaffForm({ ...staffForm, phone: e.target.value })} className="bg-white" /></div>
+            <Button onClick={saveStaff} className="w-full bg-blue-600 hover:bg-blue-700 text-white">{editingStaffId ? "Update Staff" : "Add Staff"}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Product Form Dialog */}
+      <Dialog open={productFormOpen} onOpenChange={setProductFormOpen}>
+        <DialogContent className="sm:max-w-lg bg-white max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{editingProductId ? "Edit Product" : "Add Product"}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5"><Label>Product Name *</Label><Input placeholder="Product name" value={productForm.name} onChange={(e) => setProductForm({ ...productForm, name: e.target.value })} className="bg-white" /></div>
+            <div className="space-y-1.5"><Label>Price *</Label><Input placeholder="₹1,999" value={productForm.price} onChange={(e) => setProductForm({ ...productForm, price: e.target.value })} className="bg-white" /></div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Category</Label>
+                <Select value={productForm.category} onValueChange={(val) => setProductForm({ ...productForm, category: val })}>
+                  <SelectTrigger className="bg-white"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Accessories">Accessories</SelectItem>
+                    <SelectItem value="Components">Components</SelectItem>
+                    <SelectItem value="Repair Parts">Repair Parts</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Type</Label>
+                <Input placeholder="e.g. Laptop, Keyboard" value={productForm.type} onChange={(e) => setProductForm({ ...productForm, type: e.target.value })} className="bg-white" />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Variant</Label>
+              <Input placeholder="e.g. i5/8GB/512GB, Mechanical" value={productForm.variant} onChange={(e) => setProductForm({ ...productForm, variant: e.target.value })} className="bg-white" />
+            </div>
+
+            {/* Image Upload */}
+            <div className="space-y-1.5">
+              <Label>Product Image</Label>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Image URL (https://...)"
+                  value={productForm.image && !productForm.image.startsWith("data:") ? productForm.image : ""}
+                  onChange={(e) => setProductForm({ ...productForm, image: e.target.value })}
+                  className="bg-white flex-1"
+                />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleImageUpload(file);
+                  }}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={imageUploading}
+                  className="gap-1 shrink-0"
+                >
+                  {imageUploading ? (
+                    <span className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <Upload className="w-4 h-4" />
+                  )}
+                  Upload
+                </Button>
+              </div>
+              {/* Image Preview */}
+              {productForm.image && (
+                <div className="mt-2 relative inline-block">
+                  <img src={productForm.image} alt="Preview" className="h-20 w-20 object-cover rounded-lg border" />
+                  <button
+                    onClick={() => setProductForm({ ...productForm, image: "" })}
+                    className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center text-xs"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1.5"><Label>Description</Label><Textarea placeholder="Product description" value={productForm.description} onChange={(e) => setProductForm({ ...productForm, description: e.target.value })} rows={2} className="bg-white" /></div>
+            <Button onClick={saveProduct} className="w-full bg-blue-600 hover:bg-blue-700 text-white">{editingProductId ? "Update Product" : "Add Product"}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
